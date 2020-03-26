@@ -2,7 +2,6 @@ package topologymanager
 
 import (
 	"fmt"
-	"os"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 	corev1 "k8s.io/api/core/v1"
@@ -17,41 +16,18 @@ import (
 	o "github.com/onsi/gomega"
 )
 
-func enoughCoresInTheCluster(nodes []corev1.Node, pps PodParamsList) (resource.Quantity, resource.Quantity, bool) {
-	var maxAvailCpu resource.Quantity
-	requestCpu := resource.MustParse(fmt.Sprintf("%dm", pps.TotalCpuRequest()))
-	e2e.Logf("checking request %v on %d nodes", requestCpu, len(nodes))
-
-	for _, node := range nodes {
-		availCpu, ok := node.Status.Allocatable[corev1.ResourceCPU]
-		o.Expect(ok).To(o.BeTrue())
-		o.Expect(availCpu.IsZero()).To(o.BeFalse())
-
-		if availCpu.Cmp(maxAvailCpu) > 1 {
-			e2e.Logf("max available cpu %v -> %v", maxAvailCpu, availCpu)
-			maxAvailCpu = availCpu
-		}
-
-		e2e.Logf("node %q available cpu %v requested cpu %v", node.Name, availCpu, requestCpu)
-		if availCpu.Cmp(requestCpu) >= 1 {
-			e2e.Logf("at least node %q has enough resources, cluster OK", node.Name)
-			return requestCpu, maxAvailCpu, true
-		}
-	}
-
-	return requestCpu, maxAvailCpu, false
-}
-
 var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured cluster", func() {
 	defer g.GinkgoRecover()
 
 	var (
-		oc              = exutil.NewCLI("topology-manager", exutil.KubeConfigPath())
-		client          clientset.Interface // shortcut
-		roleWorkerLabel string
-		workerNodes     []corev1.Node
-		topoMgrNodes    []corev1.Node
-		err             error
+		oc                 = exutil.NewCLI("topology-manager", exutil.KubeConfigPath())
+		client             clientset.Interface // shortcut
+		roleWorkerLabel    string
+		workerNodes        []corev1.Node
+		sriovNodes         []corev1.Node
+		topoMgrNodes       []corev1.Node
+		deviceResourceName string
+		err                error
 	)
 
 	g.BeforeEach(func() {
@@ -64,24 +40,32 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		e2e.ExpectNoError(err)
 		o.Expect(workerNodes).ToNot(o.BeEmpty())
 
-		topoMgrNodes = filterNodeWithTopologyManagerPolicy(workerNodes, client, oc, kubeletconfigv1beta1.SingleNumaNodeTopologyManager)
-		if _, ok := os.LookupEnv(strictCheckEnvVar); ok {
-			o.Expect(topoMgrNodes).ToNot(o.BeEmpty(), "topology manager not configured on all nodes")
+		deviceResourceName = getDeviceResourceName()
+		// deviceResourceName MAY be == "". This means "ignore devices"
+		if deviceResourceName != "" {
+			sriovNodes = filterNodeWithResource(workerNodes, deviceResourceName)
+			expectNonZeroNodes(sriovNodes, fmt.Sprintf("device %q not available on all nodes", deviceResourceName))
+			// we don't handle yet an uneven device amount on worker nodes. IOW, we expect the same amount of devices on each node
+		} else {
+			sriovNodes = workerNodes
 		}
-		if len(topoMgrNodes) < 1 {
-			g.Skip("topology manager not configured on all nodes")
-		}
+
+		topoMgrNodes = filterNodeWithTopologyManagerPolicy(sriovNodes, client, oc, kubeletconfigv1beta1.SingleNumaNodeTopologyManager)
+		expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
 	})
 
 	g.Context("with gu workload", func() {
 		t.DescribeTable("should guarantee NUMA-aligned cpu cores in gu pods",
 			func(pps PodParamsList) {
-				if requestCpu, maxAvailCpu, ok := enoughCoresInTheCluster(topoMgrNodes, pps); !ok {
-					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster max=%v requested=%v", maxAvailCpu, requestCpu))
+				if requestCpu, ok := enoughCoresInTheCluster(topoMgrNodes, pps); !ok {
+					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestCpu))
+				}
+				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, pps); !ok {
+					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestDevices))
 				}
 
 				ns := oc.KubeFramework().Namespace.Name
-				testPods := pps.MakeBusyboxPods(ns)
+				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
 				updatedPods := createPodsOnNodeSync(client, ns, nil, testPods...)
 				// rely on cascade deletion when namespace is deleted
 
@@ -90,12 +74,18 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 						out, err := getAllowedCpuListForContainer(oc, pod, &cnt)
 						e2e.ExpectNoError(err)
 						envOut := makeAllowedCpuListEnv(out)
+
+						podEnv, err := getEnvironmentVariables(oc, pod, &cnt)
+						e2e.ExpectNoError(err)
+						envOut += podEnv
+
 						e2e.Logf("pod %q container %q: %s", pod.Name, cnt.Name, envOut)
 
 						numaNodes, err := getNumaNodeCount(oc, pod, &cnt)
 						e2e.ExpectNoError(err)
 						envInfo := testEnvInfo{
-							numaNodes: numaNodes,
+							numaNodes:         numaNodes,
+							sriovResourceName: deviceResourceName,
 						}
 						numaRes, err := checkNUMAAlignment(oc.KubeFramework(), pod, &cnt, envOut, &envInfo)
 						e2e.ExpectNoError(err)
@@ -174,15 +164,17 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 })
 
 type ContainerParams struct {
-	CpuRequest int64 // millicores
-	CpuLimit   int64 // millicores
+	CpuRequest    int64 // millicores
+	CpuLimit      int64 // millicores
+	DeviceRequest int64
+	DeviceLimit   int64
 }
 
 type PodParams struct {
 	Containers []ContainerParams
 }
 
-func (pp PodParams) TotalRequest() int64 {
+func (pp PodParams) TotalCpuRequest() int64 {
 	var total int64
 	for _, cnt := range pp.Containers {
 		total += cnt.CpuRequest
@@ -190,7 +182,15 @@ func (pp PodParams) TotalRequest() int64 {
 	return total
 }
 
-func (pp PodParams) MakeBusyboxPod(namespace string) *corev1.Pod {
+func (pp PodParams) TotalDeviceRequest() int64 {
+	var total int64
+	for _, cnt := range pp.Containers {
+		total += cnt.DeviceRequest
+	}
+	return total
+}
+
+func (pp PodParams) MakeBusyboxPod(namespace, deviceName string) *corev1.Pod {
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:    namespace,
@@ -215,11 +215,21 @@ func (pp PodParams) MakeBusyboxPod(namespace string) *corev1.Pod {
 				},
 			},
 		}
+
 		if cp.CpuRequest > 0 {
 			cnt.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%dm", cp.CpuRequest))
 		}
 		if cp.CpuLimit > 0 {
 			cnt.Resources.Limits[corev1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%dm", cp.CpuLimit))
+		}
+
+		if deviceName != "" {
+			if cp.DeviceRequest > 0 {
+				cnt.Resources.Requests[corev1.ResourceName(deviceName)] = resource.MustParse(fmt.Sprintf("%d", cp.DeviceRequest))
+			}
+			if cp.DeviceLimit > 0 {
+				cnt.Resources.Limits[corev1.ResourceName(deviceName)] = resource.MustParse(fmt.Sprintf("%d", cp.DeviceLimit))
+			}
 		}
 		pod.Spec.Containers = append(pod.Spec.Containers, cnt)
 	}
@@ -229,10 +239,10 @@ func (pp PodParams) MakeBusyboxPod(namespace string) *corev1.Pod {
 
 type PodParamsList []PodParams
 
-func (pps PodParamsList) MakeBusyboxPods(namespace string) []*corev1.Pod {
+func (pps PodParamsList) MakeBusyboxPods(namespace, deviceName string) []*corev1.Pod {
 	var pods []*corev1.Pod
 	for _, pp := range pps {
-		pods = append(pods, pp.MakeBusyboxPod(namespace))
+		pods = append(pods, pp.MakeBusyboxPod(namespace, deviceName))
 	}
 	return pods
 }
@@ -240,20 +250,53 @@ func (pps PodParamsList) MakeBusyboxPods(namespace string) []*corev1.Pod {
 func (pps PodParamsList) TotalCpuRequest() int64 {
 	var total int64
 	for _, pp := range pps {
-		total += pp.TotalRequest()
+		total += pp.TotalCpuRequest()
 	}
 	return total
 }
 
-func allEqual(values []string) bool {
-	if len(values) == 1 {
-		return true
+func (pps PodParamsList) TotalDeviceRequest() int64 {
+	var total int64
+	for _, pp := range pps {
+		total += pp.TotalDeviceRequest()
 	}
-	refValue := values[0]
-	for _, val := range values[1:] {
-		if val != refValue {
-			return false
+	return total
+}
+
+func enoughCoresInTheCluster(nodes []corev1.Node, pps PodParamsList) (resource.Quantity, bool) {
+	requestCpu := resource.MustParse(fmt.Sprintf("%dm", pps.TotalCpuRequest()))
+	e2e.Logf("checking request %v on %d nodes", requestCpu, len(nodes))
+
+	for _, node := range nodes {
+		availCpu, ok := node.Status.Allocatable[corev1.ResourceCPU]
+		o.Expect(ok).To(o.BeTrue())
+		o.Expect(availCpu.IsZero()).To(o.BeFalse())
+
+		e2e.Logf("node %q available cpu %v requested cpu %v", node.Name, availCpu, requestCpu)
+		if availCpu.Cmp(requestCpu) >= 1 {
+			e2e.Logf("at least node %q has enough resources, cluster OK", node.Name)
+			return requestCpu, true
 		}
 	}
-	return true
+
+	return requestCpu, false
+}
+
+func enoughDevicesInTheCluster(nodes []corev1.Node, deviceResourceName string, pps PodParamsList) (resource.Quantity, bool) {
+	requestDevs := resource.MustParse(fmt.Sprintf("%d", pps.TotalDeviceRequest()))
+	e2e.Logf("checking request %v on %d nodes", requestDevs, len(nodes))
+
+	for _, node := range nodes {
+		availDevs, ok := node.Status.Allocatable[corev1.ResourceName(deviceResourceName)]
+		o.Expect(ok).To(o.BeTrue())
+		o.Expect(availDevs.IsZero()).To(o.BeFalse())
+
+		e2e.Logf("node %q available devs %v requested devs %v", node.Name, availDevs, requestDevs)
+		if availDevs.Cmp(requestDevs) >= 1 {
+			e2e.Logf("at least node %q has enough resources, cluster OK", node.Name)
+			return requestDevs, true
+		}
+	}
+
+	return requestDevs, false
 }
