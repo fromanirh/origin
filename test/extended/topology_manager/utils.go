@@ -18,12 +18,16 @@ import (
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 	"sigs.k8s.io/yaml"
+
+	g "github.com/onsi/ginkgo"
+	o "github.com/onsi/gomega"
 )
 
 const (
 	strictCheckEnvVar = "TOPOLOGY_MANAGER_TEST_STRICT"
 
-	defaultRoleWorker = "worker"
+	defaultRoleWorker   = "worker"
+	defaultResourceName = "openshift.io/intelnics"
 
 	namespaceMachineConfigOperator = "openshift-machine-config-operator"
 	containerMachineConfigDaemon   = "machine-config-daemon"
@@ -49,6 +53,39 @@ func getRoleWorkerLabel() string {
 	}
 	e2e.Logf("role worker: %q", roleWorker)
 	return roleWorker
+}
+
+func getDeviceResourceName() string {
+	resourceName := defaultResourceName
+	if rn, ok := os.LookupEnv("RESOURCE_NAME"); ok {
+		resourceName = rn
+	}
+	e2e.Logf("resource name: %q", resourceName)
+	return resourceName
+}
+
+func expectNonZeroNodes(nodes []corev1.Node, message string) {
+	if _, ok := os.LookupEnv(strictCheckEnvVar); ok {
+		o.Expect(nodes).ToNot(o.BeEmpty(), message)
+	}
+	if len(nodes) < 1 {
+		g.Skip(message)
+	}
+}
+
+func filterNodeWithResource(workerNodes []corev1.Node, resourceName string) []corev1.Node {
+	var enabledNodes []corev1.Node
+
+	for _, node := range workerNodes {
+		e2e.Logf("Node %q status allocatable: %v", node.Name, node.Status.Allocatable)
+		if val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]; ok {
+			v := val.Value()
+			if v > 0 {
+				enabledNodes = append(enabledNodes, node)
+			}
+		}
+	}
+	return enabledNodes
 }
 
 func filterNodeWithTopologyManagerPolicy(workerNodes []corev1.Node, client clientset.Interface, oc *exutil.CLI, policy string) []corev1.Node {
@@ -111,12 +148,23 @@ const (
 	sysFSNumaNodePath = "/sys/devices/system/node"
 )
 
-func getNumaNodeSysfsList(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (string, error) {
-	initialArgs := []string{
+func getContainerRshArgs(pod *corev1.Pod, cnt *corev1.Container) []string {
+	return []string{
 		"-n", pod.Namespace,
 		"-c", cnt.Name,
 		pod.Name,
 	}
+}
+
+func getEnvironmentVariables(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (string, error) {
+	initialArgs := getContainerRshArgs(pod, cnt)
+	command := []string{"env"}
+	args := append(initialArgs, command...)
+	return oc.AsAdmin().Run("rsh").Args(args...).Output()
+}
+
+func getNumaNodeSysfsList(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (string, error) {
+	initialArgs := getContainerRshArgs(pod, cnt)
 	command := []string{
 		"find",
 		"/sys/devices/system/node",
@@ -142,11 +190,7 @@ func getNumaNodeCount(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (i
 }
 
 func getAllowedCpuListForContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (string, error) {
-	initialArgs := []string{
-		"-n", pod.Namespace,
-		"-c", cnt.Name,
-		pod.Name,
-	}
+	initialArgs := getContainerRshArgs(pod, cnt)
 	command := []string{
 		"grep",
 		"Cpus_allowed_list",
