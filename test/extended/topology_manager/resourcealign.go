@@ -40,27 +40,56 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		e2e.ExpectNoError(err)
 		o.Expect(workerNodes).ToNot(o.BeEmpty())
 
+		topoMgrNodes = filterNodeWithTopologyManagerPolicy(workerNodes, client, oc, kubeletconfigv1beta1.SingleNumaNodeTopologyManager)
+		expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
+
 		deviceResourceName = getDeviceResourceName()
 		// deviceResourceName MAY be == "". This means "ignore devices"
 		if deviceResourceName != "" {
-			sriovNodes = filterNodeWithResource(workerNodes, deviceResourceName)
-			expectNonZeroNodes(sriovNodes, fmt.Sprintf("device %q not available on all nodes", deviceResourceName))
+			sriovNodes = filterNodeWithResource(topoMgrNodes, deviceResourceName)
 			// we don't handle yet an uneven device amount on worker nodes. IOW, we expect the same amount of devices on each node
 		} else {
-			sriovNodes = workerNodes
+			sriovNodes = topoMgrNodes
 		}
+	})
 
-		topoMgrNodes = filterNodeWithTopologyManagerPolicy(sriovNodes, client, oc, kubeletconfigv1beta1.SingleNumaNodeTopologyManager)
-		expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
+	g.Context("with non-gu workload", func() {
+		t.DescribeTable("should run with no regressions",
+			func(pps PodParamsList) {
+				ns := oc.KubeFramework().Namespace.Name
+				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
+				// we just want to run pods and check they actually go running
+				createPodsOnNodeSync(client, ns, nil, testPods...)
+				// rely on cascade deletion when namespace is deleted
+			},
+			// fhbz#1813397 - k8s issue83775
+			t.Entry("with single pod, single container requesting 1 core", []PodParams{
+				{
+					Containers: []ContainerParams{{
+						CpuRequest: 1000,
+					}},
+				},
+			}),
+			// fhbz#1813397 - k8s issue83775
+			t.Entry("with single pod, single container requesting multiple cores", []PodParams{
+				{
+					Containers: []ContainerParams{{
+						CpuRequest: 2500,
+					}},
+				},
+			}),
+		)
 	})
 
 	g.Context("with gu workload", func() {
 		t.DescribeTable("should guarantee NUMA-aligned cpu cores in gu pods",
 			func(pps PodParamsList) {
-				if requestCpu, ok := enoughCoresInTheCluster(topoMgrNodes, pps); !ok {
+				expectNonZeroNodes(sriovNodes, fmt.Sprintf("device %q not available on all nodes", deviceResourceName))
+
+				if requestCpu, ok := enoughCoresInTheCluster(sriovNodes, pps); !ok {
 					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestCpu))
 				}
-				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, pps); !ok {
+				if requestDevices, ok := enoughDevicesInTheCluster(sriovNodes, deviceResourceName, pps); !ok {
 					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestDevices))
 				}
 
