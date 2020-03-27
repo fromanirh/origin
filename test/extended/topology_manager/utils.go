@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,8 +42,6 @@ const (
 
 const (
 	filePathKubeletConfig = "/etc/kubernetes/kubelet.conf"
-	filePathKubePodsSlice = "/sys/fs/cgroup/cpuset/kubepods.slice"
-	filePathSysCPU        = "/sys/devices/system/cpu"
 )
 
 func getRoleWorkerLabel() string {
@@ -70,6 +69,20 @@ func expectNonZeroNodes(nodes []corev1.Node, message string) {
 	if len(nodes) < 1 {
 		g.Skip(message)
 	}
+}
+
+func findNodeWithMultiNuma(nodes []corev1.Node, c clientset.Interface, oc *exutil.CLI) (*corev1.Node, int) {
+	for _, node := range nodes {
+		numaNodes, err := getNumaNodeCountFromNode(c, oc, &node)
+		if err != nil {
+			e2e.Logf("error getting the NUMA node count from %q: %v", node.Name, err)
+			continue
+		}
+		if numaNodes > 1 {
+			return &node, numaNodes
+		}
+	}
+	return nil, 0
 }
 
 func filterNodeWithResource(workerNodes []corev1.Node, resourceName string) []corev1.Node {
@@ -164,26 +177,20 @@ func getEnvironmentVariables(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Contai
 
 func getNumaNodeSysfsList(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (string, error) {
 	initialArgs := getContainerRshArgs(pod, cnt)
-	command := []string{
-		"find",
-		"/sys/devices/system/node",
-		"-type", "d",
-		"-name", "node*",
-		"-print",
-	}
+	command := []string{"cat", "/sys/devices/system/node/online"}
 	args := append(initialArgs, command...)
 	return oc.AsAdmin().Run("rsh").Args(args...).Output()
 }
 
-func getNumaNodeCount(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (int, error) {
+func getNumaNodeCountFromContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (int, error) {
 	out, err := getNumaNodeSysfsList(oc, pod, cnt)
 	if err != nil {
 		return 0, err
 	}
-	nodes := strings.Split(out, "\n")
-	e2e.Logf("out=%q nodes=%v", out, nodes)
-	// the first entry find returns is the top level dire. We will have at least 1 NUMA node, so this is safe
-	nodeNum := len(nodes) - 1
+	nodeNum, err := parseSysfsNodeOnline(out)
+	if err != nil {
+		return 0, err
+	}
 	e2e.Logf("pod %q cnt %q NUMA nodes %d", pod.Name, cnt.Name, nodeNum)
 	return nodeNum, nil
 }
@@ -235,6 +242,36 @@ func getKubeletConfig(c clientset.Interface, oc *exutil.CLI, node *corev1.Node) 
 		return nil, err
 	}
 	return kubeletConfig, err
+}
+
+func parseSysfsNodeOnline(data string) (int, error) {
+	/*
+	    The file content is expected to be:
+	   "0\n" in one-node case
+	   "0-K\n" in N-node case where K=N-1
+	*/
+	info := strings.TrimSpace(data)
+	pair := strings.SplitN(info, "-", 2)
+	if len(pair) != 2 {
+		return 1, nil
+	}
+	return strconv.Atoi(pair[1])
+}
+
+func getNumaNodeCountFromNode(c clientset.Interface, oc *exutil.CLI, node *corev1.Node) (int, error) {
+	command := []string{"cat", "/sys/devices/system/node/online"}
+	out, err := execCommandOnMachineConfigDaemon(c, oc, node, command)
+	if err != nil {
+		return 0, err
+	}
+
+	e2e.Logf("command output: %s", out)
+	nodeNum, err := parseSysfsNodeOnline(out)
+	if err != nil {
+		return 0, err
+	}
+	e2e.Logf("node %q NUMA nodes %d", node.Name, nodeNum)
+	return nodeNum, nil
 }
 
 func makeBusyboxPod(namespace string) *corev1.Pod {
