@@ -1,7 +1,11 @@
 package topologymanager
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"regexp"
+	"time"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 	corev1 "k8s.io/api/core/v1"
@@ -10,6 +14,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 
 	g "github.com/onsi/ginkgo"
 	t "github.com/onsi/ginkgo/extensions/table"
@@ -82,6 +87,102 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 	})
 
 	g.Context("with gu workload", func() {
+
+		g.Describe("saturating NUMA nodes", func() {
+			var (
+				f         *e2e.Framework
+				node      *corev1.Node
+				numaNodes int64
+				val       int64
+			)
+
+			g.BeforeEach(func() {
+				var nn int
+				f = oc.KubeFramework()
+				node, nn = findNodeWithMultiNuma(sriovNodes, client, oc)
+
+				message := "multi-NUMA node system not found in the cluster"
+				if _, ok := os.LookupEnv(strictCheckEnvVar); ok {
+					o.Expect(node).ToNot(o.BeNil(), message)
+				}
+				if node == nil {
+					g.Skip(message)
+				}
+				numaNodes = int64(nn)
+
+				availCpu, ok := node.Status.Allocatable[corev1.ResourceCPU]
+				o.Expect(ok).To(o.BeTrue())
+				o.Expect(availCpu.IsZero()).To(o.BeFalse())
+
+				val, ok := availCpu.AsInt64()
+				o.Expect(ok).To(o.BeTrue(), fmt.Sprintf("failed to convert the CPU resource: %v", availCpu))
+				o.Expect(val%numaNodes).To(o.BeZero(), fmt.Sprintf("allocatable cores %d not multiple of detected NUMA nodes count %d", val, numaNodes))
+
+			})
+
+			g.It("should reject pod requesting more cores than a single NUMA node have", func() {
+				// the following assumes:
+				// 1. even split of cores between NUMA nodes. Do we know when this is not the case?
+				// 2. even amount of cores in the system. Gone forever are the times of the athlon II X3?
+				// so for any even number of numa nodes > 1, there is no way this request can be fullfilled
+				// by just a single NUMA
+				cpuReq := 1 + (val / 2)
+
+				pp := PodParams{
+					Containers: []ContainerParams{{
+						CpuRequest:    cpuReq * 1000,
+						CpuLimit:      cpuReq * 1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}},
+				}
+				testPod := pp.MakeBusyboxPod(f.Namespace.Name, deviceResourceName)
+				testPod.Spec.NodeSelector = map[string]string{
+					labelHostname: node.Name,
+				}
+
+				pod := f.PodClient().Create(testPod)
+				err := e2epod.WaitForPodCondition(f.ClientSet, f.Namespace.Name, pod.Name, "Failed", 30*time.Second, func(pod *corev1.Pod) (bool, error) {
+					if pod.Status.Phase != corev1.PodPending {
+						return true, nil
+					}
+					return false, nil
+				})
+				e2e.ExpectNoError(err)
+				pod, err = f.PodClient().Get(context.Background(), pod.Name, metav1.GetOptions{})
+				e2e.ExpectNoError(err)
+
+				if pod.Status.Phase != corev1.PodFailed {
+					e2e.Failf("pod %s not failed: %v", pod.Name, pod.Status)
+				}
+				if !isTopologyAffinityError(pod) {
+					e2e.Failf("pod %s failed for wrong reason: %q", pod.Name, pod.Status.Reason)
+				}
+
+				deletePods(f, []string{pod.Name})
+			})
+
+			g.It("should allow a pod requesting as many cores as a full NUMA node have", func() {
+				cpuReq := val / int64(numaNodes)
+
+				pps := PodParamsList{
+					{
+						Containers: []ContainerParams{{
+							CpuRequest:    cpuReq * 1000,
+							CpuLimit:      cpuReq * 1000,
+							DeviceRequest: 1,
+							DeviceLimit:   1,
+						}},
+					},
+				}
+				ns := f.Namespace.Name
+				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
+				updatedPods := createPodsOnNodeSync(client, ns, node, testPods...)
+				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
+			})
+
+		})
+
 		t.DescribeTable("should guarantee NUMA-aligned cpu cores in gu pods",
 			func(pps PodParamsList) {
 				expectNonZeroNodes(sriovNodes, fmt.Sprintf("device %q not available on all nodes", deviceResourceName))
@@ -96,35 +197,8 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				ns := oc.KubeFramework().Namespace.Name
 				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
 				updatedPods := createPodsOnNodeSync(client, ns, nil, testPods...)
+				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
 				// rely on cascade deletion when namespace is deleted
-
-				for _, pod := range updatedPods {
-					for _, cnt := range pod.Spec.Containers {
-						out, err := getAllowedCpuListForContainer(oc, pod, &cnt)
-						e2e.ExpectNoError(err)
-						envOut := makeAllowedCpuListEnv(out)
-
-						podEnv, err := getEnvironmentVariables(oc, pod, &cnt)
-						e2e.ExpectNoError(err)
-						envOut += podEnv
-
-						e2e.Logf("pod %q container %q: %s", pod.Name, cnt.Name, envOut)
-
-						numaNodes, err := getNumaNodeCount(oc, pod, &cnt)
-						e2e.ExpectNoError(err)
-						envInfo := testEnvInfo{
-							numaNodes:         numaNodes,
-							sriovResourceName: deviceResourceName,
-						}
-						numaRes, err := checkNUMAAlignment(oc.KubeFramework(), pod, &cnt, envOut, &envInfo)
-						e2e.ExpectNoError(err)
-						ok := numaRes.CheckAlignment()
-
-						o.Expect(ok).To(o.BeTrue(), "misaligned NUMA resources: %s", numaRes.String())
-					}
-
-				}
-
 			},
 			t.Entry("with single pod, single container requesting 1 core, 1 device", []PodParams{
 				{
@@ -394,4 +468,47 @@ func enoughDevicesInTheCluster(nodes []corev1.Node, deviceResourceName string, p
 	}
 
 	return requestDevs, false
+}
+
+func isTopologyAffinityError(pod *corev1.Pod) bool {
+	re := regexp.MustCompile(`Topology.*Affinity.*Error`)
+	return re.MatchString(pod.Status.Reason)
+}
+
+func deletePods(f *e2e.Framework, podNames []string) {
+	for _, podName := range podNames {
+		gp := int64(0)
+		delOpts := metav1.DeleteOptions{
+			GracePeriodSeconds: &gp,
+		}
+		f.PodClient().DeleteSync(podName, delOpts, e2e.DefaultPodDeletionTimeout)
+	}
+}
+
+func expectPodsHaveAlignedResources(updatedPods []*corev1.Pod, oc *exutil.CLI, deviceResourceName string) {
+	for _, pod := range updatedPods {
+		for _, cnt := range pod.Spec.Containers {
+			out, err := getAllowedCpuListForContainer(oc, pod, &cnt)
+			e2e.ExpectNoError(err)
+			envOut := makeAllowedCpuListEnv(out)
+
+			podEnv, err := getEnvironmentVariables(oc, pod, &cnt)
+			e2e.ExpectNoError(err)
+			envOut += podEnv
+
+			e2e.Logf("pod %q container %q: %s", pod.Name, cnt.Name, envOut)
+
+			numaNodes, err := getNumaNodeCountFromContainer(oc, pod, &cnt)
+			e2e.ExpectNoError(err)
+			envInfo := testEnvInfo{
+				numaNodes:         numaNodes,
+				sriovResourceName: deviceResourceName,
+			}
+			numaRes, err := checkNUMAAlignment(oc.KubeFramework(), pod, &cnt, envOut, &envInfo)
+			e2e.ExpectNoError(err)
+			ok := numaRes.CheckAlignment()
+
+			o.Expect(ok).To(o.BeTrue(), "misaligned NUMA resources: %s", numaRes.String())
+		}
+	}
 }
