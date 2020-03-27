@@ -97,71 +97,137 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				}
 
 			},
-			t.Entry("with single pod, single container requesting one core", []PodParams{
+			t.Entry("with single pod, single container requesting 1 core, 1 device", []PodParams{
 				{
 					Containers: []ContainerParams{{
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}},
 				},
 			}),
-			t.Entry("with single pod, single container requesting multiple cores", []PodParams{
+			t.Entry("with single pod, single container requesting 4 cores, 1 device", []PodParams{
 				{
+					// 4 cores is a random value. Anything >= 2, to make sure to request 2 physical cores also if HT is enabled, is fine
 					Containers: []ContainerParams{{
-						// 4 cores is a random value. Anything > 2, to make sure to request 2 physical cores also if HT is enabled, is fine
-						CpuRequest: 4000,
-						CpuLimit:   4000,
+						CpuRequest:    4000,
+						CpuLimit:      4000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}},
 				},
 			}),
-			t.Entry("with single pod, multiple containers requesting one core each", []PodParams{
+			t.Entry("with single pod, multiple containers requesting 1 core, 1 device each", []PodParams{
 				{
 					Containers: []ContainerParams{{
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}, {
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}},
 				},
 			}),
-			t.Entry("with multiple pods, each with a single container requesting one core", []PodParams{
+			t.Entry("with multiple pods, each with a single container requesting 1 core, 1 device", []PodParams{
 				{
 					Containers: []ContainerParams{{
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}},
 				},
 				{
 					Containers: []ContainerParams{{
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}},
 				},
 			}),
-			t.Entry("with multiple pods, each with multiple containers requesting one core", []PodParams{
+			t.Entry("with multiple pods, each with a single container requesting 2 core, 1 device", []PodParams{
 				{
 					Containers: []ContainerParams{{
-						CpuRequest: 1000,
-						CpuLimit:   1000,
-					}, {
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    2000,
+						CpuLimit:      2000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}},
 				},
 				{
 					Containers: []ContainerParams{{
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    2000,
+						CpuLimit:      2000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}},
+				},
+			}),
+			t.Entry("with multiple pods, each with multiple containers requesting 1 core, 1 device", []PodParams{
+				{
+					Containers: []ContainerParams{{
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
 					}, {
-						CpuRequest: 1000,
-						CpuLimit:   1000,
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}},
+				},
+				{
+					Containers: []ContainerParams{{
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}, {
+						CpuRequest:    1000,
+						CpuLimit:      1000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}},
+				},
+			}),
+			t.Entry("with multiple pods, each with multiple containers requesting 1 core, only one requesting 1 device", []PodParams{
+				{
+					Containers: []ContainerParams{{
+						CpuRequest:    2000,
+						CpuLimit:      2000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}, {
+						CpuRequest: 2000,
+						CpuLimit:   2000,
+					}},
+				},
+				{
+					Containers: []ContainerParams{{
+						CpuRequest:    2000,
+						CpuLimit:      2000,
+						DeviceRequest: 1,
+						DeviceLimit:   1,
+					}, {
+						CpuRequest: 2000,
+						CpuLimit:   2000,
 					}},
 				},
 			}),
 		)
 	})
 })
+
+// TODO: add test to saturate a NUMA node
+// TODO: add negative tests
+// TODO: add connectivity tests
 
 type ContainerParams struct {
 	CpuRequest    int64 // millicores
