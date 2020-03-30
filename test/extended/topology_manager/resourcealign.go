@@ -24,7 +24,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 	defer g.GinkgoRecover()
 
 	var (
-		oc                 = exutil.NewCLI("topology-manager", exutil.KubeConfigPath())
+		oc                 = exutil.NewCLI("topology-manager")
 		client             clientset.Interface // shortcut
 		roleWorkerLabel    string
 		workerNodes        []corev1.Node
