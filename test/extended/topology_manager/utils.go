@@ -173,14 +173,18 @@ func getEnvironmentVariables(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Contai
 	initialArgs := getContainerRshArgs(pod, cnt)
 	command := []string{"env"}
 	args := append(initialArgs, command...)
-	return oc.AsAdmin().Run("rsh").Args(args...).Output()
+	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
+	e2e.Logf("environment for pod %q container %q: %q", pod.Name, cnt.Name, out)
+	return out, err
 }
 
 func getNumaNodeSysfsList(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (string, error) {
 	initialArgs := getContainerRshArgs(pod, cnt)
 	command := []string{"cat", "/sys/devices/system/node/online"}
 	args := append(initialArgs, command...)
-	return oc.AsAdmin().Run("rsh").Args(args...).Output()
+	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
+	e2e.Logf("NUMA nodes seen by pod %q container %q: %q", pod.Name, cnt.Name, out)
+	return out, err
 }
 
 func getNumaNodeCountFromContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container) (int, error) {
@@ -192,7 +196,7 @@ func getNumaNodeCountFromContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.
 	if err != nil {
 		return 0, err
 	}
-	e2e.Logf("pod %q cnt %q NUMA nodes %d", pod.Name, cnt.Name, nodeNum)
+	e2e.Logf("NUMA nodes for pod %q container %q: count=%d", pod.Name, cnt.Name, nodeNum)
 	return nodeNum, nil
 }
 
@@ -204,7 +208,9 @@ func getAllowedCpuListForContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.
 		"/proc/self/status",
 	}
 	args := append(initialArgs, command...)
-	return oc.AsAdmin().Run("rsh").Args(args...).Output()
+	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
+	e2e.Logf("Allowed CPU list for pod %q container %q: %q", pod.Name, cnt.Name, out)
+	return out, err
 }
 
 func makeAllowedCpuListEnv(out string) string {
