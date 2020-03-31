@@ -30,3 +30,17 @@ Use this variable to change the kubernetes label to be used to search for the wo
 The testsuite need a SRIOV device resource to run alignment tests.
 Use this variable to change the resource name the test should use.
 
+### `SRIOV_NETWORK_NAMESPACE`
+
+The testsuite runs a basic connectivity test to ensure the NUMA-aligned devices are functional.
+Use this variable to set the namespace on which to look for the SRIOV network to join to exercise the connectivity.
+
+### `SRIOV_NETWORK`
+
+The testsuite runs a basic connectivity test to ensure the NUMA-aligned devices are functional.
+Use this variable to set the SRIOV network to join to exercise the connectivity.
+
+### `IP_FAMILY`
+
+The testsuite runs a basic connectivity test to ensure the NUMA-aligned devices are functional.
+Use this variable to set the IP family to use for the test: "v4" or "v6". Default is "v4".

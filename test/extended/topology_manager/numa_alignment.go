@@ -95,7 +95,7 @@ func getCPUToNUMANodeMapFromEnv(f *framework.Framework, pod *v1.Pod, cnt *v1.Con
 
 	cpusPerNUMA := make(map[int][]int)
 	for numaNode := 0; numaNode < numaNodes; numaNode++ {
-		nodeCPUList := f.ExecCommandInContainer(pod.Name, cnt.Name,
+		nodeCPUList := execCommandInContainer(f, pod.Namespace, pod.Name, cnt.Name,
 			"/bin/cat", fmt.Sprintf("/sys/devices/system/node/node%d/cpulist", numaNode))
 
 		cpus, err := cpuset.Parse(nodeCPUList)
@@ -140,12 +140,31 @@ func getPCIDeviceToNumaNodeMapFromEnv(f *framework.Framework, pod *v1.Pod, cnt *
 		// a single plugin can allocate more than a single device
 		pciDevs := strings.Split(value, ",")
 		for _, pciDev := range pciDevs {
-			pciDevNUMANode := f.ExecCommandInContainer(pod.Name, cnt.Name,
+			pciDevNUMANode := execCommandInContainer(f, pod.Namespace, pod.Name, cnt.Name,
 				"/bin/cat", fmt.Sprintf("/sys/bus/pci/devices/%s/numa_node", pciDev))
 			NUMAPerDev[pciDev] = numaNodeFromSysFsEntry(pciDevNUMANode)
 		}
 	}
 	return NUMAPerDev, nil
+}
+
+func execCommandInContainer(f *framework.Framework, namespace, podName, containerName string, cmd ...string) string {
+	stdout, stderr, err := f.ExecWithOptions(framework.ExecOptions{
+		Command:            cmd,
+		Namespace:          namespace,
+		PodName:            podName,
+		ContainerName:      containerName,
+		Stdin:              nil,
+		CaptureStdout:      true,
+		CaptureStderr:      true,
+		PreserveWhitespace: false,
+	})
+
+	framework.Logf("Exec stderr: %q", stderr)
+	framework.ExpectNoError(err,
+		"failed to execute command innamespace %v pod %v, container %v: %v",
+		namespace, podName, containerName, err)
+	return stdout
 }
 
 func makeEnvMap(logs string) (map[string]string, error) {

@@ -2,7 +2,9 @@ package topologymanager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"strconv"
@@ -25,10 +27,18 @@ import (
 )
 
 const (
-	strictCheckEnvVar = "TOPOLOGY_MANAGER_TEST_STRICT"
+	strictCheckEnvVar           = "TOPOLOGY_MANAGER_TEST_STRICT"
+	roleWorkerEnvVar            = "ROLE_WORKER"
+	resourceNameEnvVar          = "RESOURCE_NAME"
+	sriovNetworkNamespaceEnvVar = "SRIOV_NETWORK_NAMESPACE"
+	sriovNetworkEnvVar          = "SRIOV_NETWORK"
+	ipFamilyEnvVar              = "IP_FAMILY"
 
 	defaultRoleWorker   = "worker"
 	defaultResourceName = "openshift.io/intelnics"
+	// no default for sriovNetworkNamespace: use the e2e test framework default
+	defaultSriovNetwork = "sriov-network"
+	defaultIPFamily     = "v4"
 
 	namespaceMachineConfigOperator = "openshift-machine-config-operator"
 	containerMachineConfigDaemon   = "machine-config-daemon"
@@ -45,22 +55,13 @@ const (
 	filePathKubeletConfig = "/etc/kubernetes/kubelet.conf"
 )
 
-func getRoleWorkerLabel() string {
-	roleWorker := defaultRoleWorker
-	if rw, ok := os.LookupEnv("ROLE_WORKER"); ok {
-		roleWorker = rw
+func getValueFromEnv(name, fallback, desc string) string {
+	val := fallback
+	if envVal, ok := os.LookupEnv(name); ok {
+		val = envVal
 	}
-	e2e.Logf("role worker: %q", roleWorker)
-	return roleWorker
-}
-
-func getDeviceResourceName() string {
-	resourceName := defaultResourceName
-	if rn, ok := os.LookupEnv("RESOURCE_NAME"); ok {
-		resourceName = rn
-	}
-	e2e.Logf("resource name: %q", resourceName)
-	return resourceName
+	e2e.Logf("%s: %q", desc, val)
+	return val
 }
 
 func expectNonZeroNodes(nodes []corev1.Node, message string) {
@@ -324,4 +325,70 @@ func waitForPhase(c clientset.Interface, namespace, name string, phase corev1.Po
 		}
 		return false, nil
 	})
+}
+
+// GetSriovNicIPs returns the list of ip addresses related to the given
+// interface name for the given pod.
+func getSriovNicIPs(pod *corev1.Pod, ifcName string) ([]string, error) {
+	// Needed for parsing of podinfo
+	type Network struct {
+		Interface string
+		Ips       []string
+	}
+
+	var nets []Network
+	err := json.Unmarshal([]byte(pod.ObjectMeta.Annotations["k8s.v1.cni.cncf.io/networks-status"]), &nets)
+	if err != nil {
+		return nil, err
+	}
+	for _, net := range nets {
+		if net.Interface != ifcName {
+			continue
+		}
+		return net.Ips, nil
+	}
+	return nil, nil
+}
+
+func getPodsIPAddrs(pods []*corev1.Pod, iface string) (map[string][]string, error) {
+	ipOutput := make(map[string][]string)
+	for _, pod := range pods {
+		ips, err := getSriovNicIPs(pod, iface)
+		if err != nil {
+			return nil, err
+		}
+		ipOutput[pod.Name] = ips
+		e2e.Logf("pod %q IP addresses %v", pod.Name, ips)
+	}
+	return ipOutput, nil
+}
+
+func pingAddrFromPod(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container, addr string) error {
+	initialArgs := getContainerRshArgs(pod, cnt)
+	command := []string{
+		"ping",
+		"-c",
+		"3",
+		addr,
+	}
+	args := append(initialArgs, command...)
+	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
+	e2e.Logf("`%s` output for pod %q container %q: %q", strings.Join(command, " "), pod.Name, cnt.Name, out)
+	return err
+}
+
+func findFirstIPForFamily(ips []string, family string) (string, error) {
+	for _, ip := range ips {
+		addr := net.ParseIP(ip)
+		if addr == nil {
+			return "", fmt.Errorf("cannot parse IP %q", ip)
+		}
+		if family == "v6" && addr.To16() != nil {
+			return ip, nil
+		}
+		if family == "v4" && addr.To4() != nil {
+			return ip, nil
+		}
+	}
+	return "", fmt.Errorf("IP address for family %q not found in %v", family, ips)
 }
