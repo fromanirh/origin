@@ -24,10 +24,14 @@ import (
 )
 
 const (
-	strictCheckEnvVar = "TOPOLOGY_MANAGER_TEST_STRICT"
+	strictCheckEnvVar  = "TOPOLOGY_MANAGER_TEST_STRICT"
+	roleWorkerEnvVar   = "ROLE_WORKER"
+	resourceNameEnvVar = "RESOURCE_NAME"
+	sriovNetworkEnvVar = "SRIOV_NETWORK"
 
 	defaultRoleWorker   = "worker"
 	defaultResourceName = "openshift.io/intelnics"
+	defaultSriovNetwork = "sriov-network"
 
 	namespaceMachineConfigOperator = "openshift-machine-config-operator"
 	containerMachineConfigDaemon   = "machine-config-daemon"
@@ -44,22 +48,13 @@ const (
 	filePathKubeletConfig = "/etc/kubernetes/kubelet.conf"
 )
 
-func getRoleWorkerLabel() string {
-	roleWorker := defaultRoleWorker
-	if rw, ok := os.LookupEnv("ROLE_WORKER"); ok {
-		roleWorker = rw
+func getValueFromEnv(name, fallback, desc string) string {
+	val := fallback
+	if envVal, ok := os.LookupEnv(name); ok {
+		val = envVal
 	}
-	e2e.Logf("role worker: %q", roleWorker)
-	return roleWorker
-}
-
-func getDeviceResourceName() string {
-	resourceName := defaultResourceName
-	if rn, ok := os.LookupEnv("RESOURCE_NAME"); ok {
-		resourceName = rn
-	}
-	e2e.Logf("resource name: %q", resourceName)
-	return resourceName
+	e2e.Logf("%s: %q", desc, val)
+	return val
 }
 
 func expectNonZeroNodes(nodes []corev1.Node, message string) {
@@ -195,6 +190,54 @@ func getAllowedCpuListForContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.
 	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
 	e2e.Logf("Allowed CPU list for pod %q container %q: %q", pod.Name, cnt.Name, out)
 	return out, err
+}
+
+func getIPAddrOutputForContainer(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container, iface string) (string, error) {
+	initialArgs := getContainerRshArgs(pod, cnt)
+	command := []string{
+		"ip",
+		"addr",
+		"show",
+		iface,
+	}
+	args := append(initialArgs, command...)
+	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
+	e2e.Logf("`ip addr show %s` output for pod %q container %q: %q", iface, pod.Name, cnt.Name, out)
+	return out, err
+}
+
+// ASSUMPTION: all pods have the same interface name
+// ASSUMPTION: all pods have exactly one container
+// pod -> ip_as_string ; we always use container#0
+func getPODIPAddrs(oc *exutil.CLI, pods []*corev1.Pod, iface string) (map[string]string, error) {
+	ipAddrs := make(map[string]string)
+	for _, pod := range pods {
+		out, err := getIPAddrOutputForContainer(oc, pod, &(pod.Spec.Containers[0]), iface)
+		if err != nil {
+			return nil, err
+		}
+		ipAddrs[pod.Name] = out
+	}
+	return ipAddrs, nil
+}
+
+func extractIPAddr(ipAddrs map[string]string, family string) map[string]string {
+	return ipAddrs
+}
+
+func pingAddrFromPod(oc *exutil.CLI, pod *corev1.Pod, cnt *corev1.Container, addr string) error {
+	initialArgs := getContainerRshArgs(pod, cnt)
+	command := []string{
+		"ping",
+		"-c",
+		"5",
+		addr,
+	}
+	args := append(initialArgs, command...)
+	out, err := oc.AsAdmin().Run("rsh").Args(args...).Output()
+	e2e.Logf("`%s` output for pod %q container %q: %q", strings.Join(command, " "), pod.Name, cnt.Name, out)
+	return err
+
 }
 
 func makeAllowedCpuListEnv(out string) string {

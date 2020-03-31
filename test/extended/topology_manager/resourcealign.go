@@ -20,6 +20,11 @@ import (
 	o "github.com/onsi/gomega"
 )
 
+const (
+	networkAttachmentAnnotation string = "k8s.v1.cni.cncf.io/networks"
+	sriovInterfaceName          string = "sriov1"
+)
+
 var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured cluster", func() {
 	defer g.GinkgoRecover()
 
@@ -37,7 +42,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		client = oc.KubeFramework().ClientSet
 		o.Expect(client).ToNot(o.BeNil())
 
-		roleWorkerLabel = getRoleWorkerLabel()
+		roleWorkerLabel = getValueFromEnv(roleWorkerEnvVar, defaultRoleWorker, "worker role")
 
 		workerNodes, err = getNodeByRole(client, roleWorkerLabel)
 		e2e.ExpectNoError(err)
@@ -46,7 +51,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		topoMgrNodes = filterNodeWithTopologyManagerPolicy(workerNodes, client, oc, kubeletconfigv1beta1.SingleNumaNodeTopologyManager)
 		expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
 
-		deviceResourceName = getDeviceResourceName()
+		deviceResourceName = getValueFromEnv(resourceNameEnvVar, defaultResourceName, "resource name")
 		// we don't handle yet an uneven device amount on worker nodes. IOW, we expect the same amount of devices on each node
 	})
 
@@ -79,42 +84,96 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 	})
 
 	g.Context("with gu workload", func() {
+		var (
+			node      *corev1.Node
+			numaNodes int64
+			coreCount int64
+		)
+
+		g.BeforeEach(func() {
+			var nn int
+			node, nn = findNodeWithMultiNuma(topoMgrNodes, client, oc)
+
+			message := "multi-NUMA node system not found in the cluster"
+			if _, ok := os.LookupEnv(strictCheckEnvVar); ok {
+				o.Expect(node).ToNot(o.BeNil(), message)
+			}
+			if node == nil {
+				g.Skip(message)
+			}
+			numaNodes = int64(nn)
+
+			// This MUST be capacity (theoretical max) not Allocatable
+			cpuCapacity, ok := node.Status.Capacity[corev1.ResourceCPU]
+			o.Expect(ok).To(o.BeTrue())
+			o.Expect(cpuCapacity.IsZero()).To(o.BeFalse())
+
+			coreCount, ok = cpuCapacity.AsInt64()
+			o.Expect(ok).To(o.BeTrue(), fmt.Sprintf("failed to convert the CPU resource: %v", cpuCapacity))
+			o.Expect(coreCount).ToNot(o.BeZero(), fmt.Sprintf("capacity cores %d equals zero", coreCount))
+			o.Expect(coreCount%numaNodes).To(o.BeZero(), fmt.Sprintf("capacity cores %d not multiple of detected NUMA nodes count %d", coreCount, numaNodes))
+
+			e2e.Logf("CPU capacity on %q: %d", node.Name, coreCount)
+		})
+
+		g.Describe("attached to SRIOV networks", func() {
+			g.It("should let resource-aligned PODs have working SRIOV network interface", func() {
+				// any random amount of cores > 2 (to be HT-neutral)
+				pps := PodParamsList{
+					{
+						Containers: []ContainerParams{{
+							CpuRequest:    4000,
+							CpuLimit:      4000,
+							DeviceRequest: 1,
+							DeviceLimit:   1,
+						}},
+					},
+					{
+						Containers: []ContainerParams{{
+							CpuRequest:    4000,
+							CpuLimit:      4000,
+							DeviceRequest: 1,
+							DeviceLimit:   1,
+						}},
+					},
+				}
+
+				if requestCpu, ok := enoughCoresInTheCluster(topoMgrNodes, pps); !ok {
+					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestCpu))
+				}
+				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, pps); !ok {
+					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
+				}
+
+				testFw := oc.KubeFramework()
+				testNs := testFw.Namespace.Name
+
+				sriovNetwork := getValueFromEnv(sriovNetworkEnvVar, defaultSriovNetwork, "SRIOV network")
+				o.Expect(sriovNetwork).ToNot(o.BeEmpty(), fmt.Sprintf("missing SRIOV network to join"))
+
+				testPods := pps.MakeBusyboxPods(testNs, deviceResourceName)
+				for _, testPod := range testPods {
+					testPod.Annotations = map[string]string{
+						networkAttachmentAnnotation: fmt.Sprintf("%s@%s", sriovNetwork, sriovInterfaceName),
+					}
+				}
+				updatedPods := createPodsOnNodeSync(client, testNs, nil, testPods...)
+				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
+
+				ipOut, err := getPODIPAddrs(oc, updatedPods, sriovInterfaceName)
+				e2e.ExpectNoError(err)
+				ipv4Addrs := extractIPAddr(ipOut, "inet")
+
+				for _, srcPod := range updatedPods {
+					for _, dstAddr := range ipv4Addrs {
+						err := pingAddrFromPod(oc, srcPod, &(srcPod.Spec.Containers[0]), dstAddr)
+						e2e.ExpectNoError(err)
+					}
+				}
+			})
+		})
 
 		g.Describe("saturating NUMA nodes", func() {
-			var (
-				f         *e2e.Framework
-				node      *corev1.Node
-				numaNodes int64
-				coreCount int64
-			)
-
-			g.BeforeEach(func() {
-				var nn int
-				f = oc.KubeFramework()
-				node, nn = findNodeWithMultiNuma(topoMgrNodes, client, oc)
-
-				message := "multi-NUMA node system not found in the cluster"
-				if _, ok := os.LookupEnv(strictCheckEnvVar); ok {
-					o.Expect(node).ToNot(o.BeNil(), message)
-				}
-				if node == nil {
-					g.Skip(message)
-				}
-				numaNodes = int64(nn)
-
-				// This MUST be capacity (theoretical max) not Allocatable
-				cpuCapacity, ok := node.Status.Capacity[corev1.ResourceCPU]
-				o.Expect(ok).To(o.BeTrue())
-				o.Expect(cpuCapacity.IsZero()).To(o.BeFalse())
-
-				coreCount, ok = cpuCapacity.AsInt64()
-				o.Expect(ok).To(o.BeTrue(), fmt.Sprintf("failed to convert the CPU resource: %v", cpuCapacity))
-				o.Expect(coreCount).ToNot(o.BeZero(), fmt.Sprintf("capacity cores %d equals zero", coreCount))
-				o.Expect(coreCount%numaNodes).To(o.BeZero(), fmt.Sprintf("capacity cores %d not multiple of detected NUMA nodes count %d", coreCount, numaNodes))
-
-				e2e.Logf("CPU capacity on %q: %d", node.Name, coreCount)
-			})
-
 			g.It("should reject pod requesting more cores than a single NUMA node have", func() {
 				// the following assumes:
 				// 1. even split of cores between NUMA nodes. Do we know when this is not the case?
@@ -134,21 +193,23 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, PodParamsList{pp}); !ok {
 					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
 				}
+				testFw := oc.KubeFramework()
+				testNs := testFw.Namespace.Name
 
-				testPod := pp.MakeBusyboxPod(f.Namespace.Name, deviceResourceName)
+				testPod := pp.MakeBusyboxPod(testNs, deviceResourceName)
 				testPod.Spec.NodeSelector = map[string]string{
 					labelHostname: node.Name,
 				}
 
-				pod := f.PodClient().Create(testPod)
-				err := e2epod.WaitForPodCondition(f.ClientSet, f.Namespace.Name, pod.Name, "Failed", 30*time.Second, func(pod *corev1.Pod) (bool, error) {
+				pod := testFw.PodClient().Create(testPod)
+				err := e2epod.WaitForPodCondition(testFw.ClientSet, testNs, pod.Name, "Failed", 30*time.Second, func(pod *corev1.Pod) (bool, error) {
 					if pod.Status.Phase != corev1.PodPending {
 						return true, nil
 					}
 					return false, nil
 				})
 				e2e.ExpectNoError(err)
-				pod, err = f.PodClient().Get(pod.Name, metav1.GetOptions{})
+				pod, err = testFw.PodClient().Get(pod.Name, metav1.GetOptions{})
 				e2e.ExpectNoError(err)
 
 				if pod.Status.Phase != corev1.PodFailed {
@@ -158,7 +219,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 					e2e.Failf("pod %s failed for wrong reason: %q", pod.Name, pod.Status.Reason)
 				}
 
-				deletePods(f, []string{pod.Name})
+				deletePods(testFw, []string{pod.Name})
 			})
 
 			g.It("should allow a pod requesting as many cores as a full NUMA node have", func() {
@@ -178,9 +239,9 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
 				}
 
-				ns := f.Namespace.Name
-				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
-				updatedPods := createPodsOnNodeSync(client, ns, node, testPods...)
+				testNs := oc.KubeFramework().Namespace.Name
+				testPods := pps.MakeBusyboxPods(testNs, deviceResourceName)
+				updatedPods := createPodsOnNodeSync(client, testNs, node, testPods...)
 				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
 			})
 
@@ -195,9 +256,9 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
 				}
 
-				ns := oc.KubeFramework().Namespace.Name
-				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
-				updatedPods := createPodsOnNodeSync(client, ns, nil, testPods...)
+				testNs := oc.KubeFramework().Namespace.Name
+				testPods := pps.MakeBusyboxPods(testNs, deviceResourceName)
+				updatedPods := createPodsOnNodeSync(client, testNs, nil, testPods...)
 				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
 				// rely on cascade deletion when namespace is deleted
 			},
