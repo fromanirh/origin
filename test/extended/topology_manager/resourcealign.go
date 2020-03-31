@@ -93,7 +93,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				f         *e2e.Framework
 				node      *corev1.Node
 				numaNodes int64
-				val       int64
+				coreCount int64
 			)
 
 			g.BeforeEach(func() {
@@ -110,13 +110,17 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				}
 				numaNodes = int64(nn)
 
-				availCpu, ok := node.Status.Allocatable[corev1.ResourceCPU]
+				// This MUST be capacity (theoretical max) not Allocatable
+				cpuCapacity, ok := node.Status.Capacity[corev1.ResourceCPU]
 				o.Expect(ok).To(o.BeTrue())
-				o.Expect(availCpu.IsZero()).To(o.BeFalse())
+				o.Expect(cpuCapacity.IsZero()).To(o.BeFalse())
 
-				val, ok := availCpu.AsInt64()
-				o.Expect(ok).To(o.BeTrue(), fmt.Sprintf("failed to convert the CPU resource: %v", availCpu))
-				o.Expect(val%numaNodes).To(o.BeZero(), fmt.Sprintf("allocatable cores %d not multiple of detected NUMA nodes count %d", val, numaNodes))
+				coreCount, ok = cpuCapacity.AsInt64()
+				o.Expect(ok).To(o.BeTrue(), fmt.Sprintf("failed to convert the CPU resource: %v", cpuCapacity))
+				o.Expect(coreCount).ToNot(o.BeZero(), fmt.Sprintf("capacity cores %d equals zero", coreCount))
+				o.Expect(coreCount%numaNodes).To(o.BeZero(), fmt.Sprintf("capacity cores %d not multiple of detected NUMA nodes count %d", coreCount, numaNodes))
+
+				e2e.Logf("CPU capacity on %q: %d", node.Name, coreCount)
 
 			})
 
@@ -126,8 +130,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				// 2. even amount of cores in the system. Gone forever are the times of the athlon II X3?
 				// so for any even number of numa nodes > 1, there is no way this request can be fullfilled
 				// by just a single NUMA
-				cpuReq := 1 + (val / 2)
-
+				cpuReq := 1 + (coreCount / 2)
 				pp := PodParams{
 					Containers: []ContainerParams{{
 						CpuRequest:    cpuReq * 1000,
@@ -136,6 +139,8 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 						DeviceLimit:   1,
 					}},
 				}
+				e2e.Logf("using cpuReq=%d PodParams: %#v", cpuReq, pp)
+
 				testPod := pp.MakeBusyboxPod(f.Namespace.Name, deviceResourceName)
 				testPod.Spec.NodeSelector = map[string]string{
 					labelHostname: node.Name,
@@ -163,8 +168,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 			})
 
 			g.It("should allow a pod requesting as many cores as a full NUMA node have", func() {
-				cpuReq := val / int64(numaNodes)
-
+				cpuReq := coreCount / int64(numaNodes)
 				pps := PodParamsList{
 					{
 						Containers: []ContainerParams{{
@@ -175,6 +179,8 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 						}},
 					},
 				}
+				e2e.Logf("using cpuReq=%d PodParams: %#v", cpuReq, pps)
+
 				ns := f.Namespace.Name
 				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
 				updatedPods := createPodsOnNodeSync(client, ns, node, testPods...)
