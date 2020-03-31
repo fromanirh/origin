@@ -86,21 +86,6 @@ func findNodeWithMultiNuma(nodes []corev1.Node, c clientset.Interface, oc *exuti
 	return nil, 0
 }
 
-func filterNodeWithResource(workerNodes []corev1.Node, resourceName string) []corev1.Node {
-	var enabledNodes []corev1.Node
-
-	for _, node := range workerNodes {
-		e2e.Logf("Node %q status allocatable: %v", node.Name, node.Status.Allocatable)
-		if val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]; ok {
-			v := val.Value()
-			if v > 0 {
-				enabledNodes = append(enabledNodes, node)
-			}
-		}
-	}
-	return enabledNodes
-}
-
 func filterNodeWithTopologyManagerPolicy(workerNodes []corev1.Node, client clientset.Interface, oc *exutil.CLI, policy string) []corev1.Node {
 	ocRaw := (*oc).WithoutNamespace()
 
