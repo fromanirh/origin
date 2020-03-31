@@ -28,7 +28,6 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		client             clientset.Interface // shortcut
 		roleWorkerLabel    string
 		workerNodes        []corev1.Node
-		sriovNodes         []corev1.Node
 		topoMgrNodes       []corev1.Node
 		deviceResourceName string
 		err                error
@@ -48,13 +47,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
 
 		deviceResourceName = getDeviceResourceName()
-		// deviceResourceName MAY be == "". This means "ignore devices"
-		if deviceResourceName != "" {
-			sriovNodes = filterNodeWithResource(topoMgrNodes, deviceResourceName)
-			// we don't handle yet an uneven device amount on worker nodes. IOW, we expect the same amount of devices on each node
-		} else {
-			sriovNodes = topoMgrNodes
-		}
+		// we don't handle yet an uneven device amount on worker nodes. IOW, we expect the same amount of devices on each node
 	})
 
 	g.Context("with non-gu workload", func() {
@@ -98,7 +91,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 			g.BeforeEach(func() {
 				var nn int
 				f = oc.KubeFramework()
-				node, nn = findNodeWithMultiNuma(sriovNodes, client, oc)
+				node, nn = findNodeWithMultiNuma(topoMgrNodes, client, oc)
 
 				message := "multi-NUMA node system not found in the cluster"
 				if _, ok := os.LookupEnv(strictCheckEnvVar); ok {
@@ -120,7 +113,6 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				o.Expect(coreCount%numaNodes).To(o.BeZero(), fmt.Sprintf("capacity cores %d not multiple of detected NUMA nodes count %d", coreCount, numaNodes))
 
 				e2e.Logf("CPU capacity on %q: %d", node.Name, coreCount)
-
 			})
 
 			g.It("should reject pod requesting more cores than a single NUMA node have", func() {
@@ -139,6 +131,9 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 					}},
 				}
 				e2e.Logf("using cpuReq=%d PodParams: %#v", cpuReq, pp)
+				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, PodParamsList{pp}); !ok {
+					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
+				}
 
 				testPod := pp.MakeBusyboxPod(f.Namespace.Name, deviceResourceName)
 				testPod.Spec.NodeSelector = map[string]string{
@@ -179,6 +174,9 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 					},
 				}
 				e2e.Logf("using cpuReq=%d PodParams: %#v", cpuReq, pps)
+				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, pps); !ok {
+					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
+				}
 
 				ns := f.Namespace.Name
 				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
@@ -190,13 +188,11 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 
 		t.DescribeTable("should guarantee NUMA-aligned cpu cores in gu pods",
 			func(pps PodParamsList) {
-				expectNonZeroNodes(sriovNodes, fmt.Sprintf("device %q not available on all nodes", deviceResourceName))
-
-				if requestCpu, ok := enoughCoresInTheCluster(sriovNodes, pps); !ok {
+				if requestCpu, ok := enoughCoresInTheCluster(topoMgrNodes, pps); !ok {
 					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestCpu))
 				}
-				if requestDevices, ok := enoughDevicesInTheCluster(sriovNodes, deviceResourceName, pps); !ok {
-					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestDevices))
+				if requestDevices, ok := enoughDevicesInTheCluster(topoMgrNodes, deviceResourceName, pps); !ok {
+					g.Skip(fmt.Sprintf("not enough devices %q in the cluster requested=%v", deviceResourceName, requestDevices))
 				}
 
 				ns := oc.KubeFramework().Namespace.Name
