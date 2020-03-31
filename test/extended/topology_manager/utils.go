@@ -262,7 +262,11 @@ func parseSysfsNodeOnline(data string) (int, error) {
 	if len(pair) != 2 {
 		return 1, nil
 	}
-	return strconv.Atoi(pair[1])
+	out, err := strconv.Atoi(pair[1])
+	if err != nil {
+		return 0, err
+	}
+	return out + 1, nil
 }
 
 func getNumaNodeCountFromNode(c clientset.Interface, oc *exutil.CLI, node *corev1.Node) (int, error) {
