@@ -495,7 +495,7 @@ func expectPodsHaveAlignedResources(updatedPods []*corev1.Pod, oc *exutil.CLI, d
 			e2e.ExpectNoError(err)
 			envOut += podEnv
 
-			e2e.Logf("pod %q container %q: %s", pod.Name, cnt.Name, envOut)
+			e2e.Logf("Full environment for pod %q container %q: %q", pod.Name, cnt.Name, envOut)
 
 			numaNodes, err := getNumaNodeCountFromContainer(oc, pod, &cnt)
 			e2e.ExpectNoError(err)
