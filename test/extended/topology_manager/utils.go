@@ -305,6 +305,7 @@ func createPodsOnNodeSync(client clientset.Interface, namespace string, node *co
 		e2e.ExpectNoError(err)
 
 		err = waitForPhase(client, created.Namespace, created.Name, corev1.PodRunning, 5*time.Minute)
+		e2e.ExpectNoError(err)
 
 		updatedPod, err := client.CoreV1().Pods(created.Namespace).Get(context.Background(), created.Name, metav1.GetOptions{})
 		e2e.ExpectNoError(err)
@@ -320,6 +321,7 @@ func waitForPhase(c clientset.Interface, namespace, name string, phase corev1.Po
 		if err != nil {
 			return false, nil
 		}
+		e2e.Logf("pod %q phase %s", updatedPod.Name, updatedPod.Status.Phase)
 		if updatedPod.Status.Phase == phase {
 			return true, nil
 		}
