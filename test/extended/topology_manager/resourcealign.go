@@ -59,10 +59,10 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		t.DescribeTable("should run with no regressions",
 			func(pps PodParamsList) {
 				ns := oc.KubeFramework().Namespace.Name
-				testPods := pps.MakeBusyboxPods(ns, deviceResourceName)
+				testingPods := pps.MakeBusyboxPods(ns, deviceResourceName)
 				// we just want to run pods and check they actually go running
-				createPodsOnNodeSync(client, ns, nil, testPods...)
-				// rely on cascade deletion when namespace is deleted
+				createPodsOnNodeSync(client, ns, nil, testingPods...)
+				defer deletePods(oc, testingPods)
 			},
 			// fhbz#1813397 - k8s issue83775
 			t.Entry("with single pod, single container requesting 1 core", []PodParams{
@@ -153,22 +153,21 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				sriovNetwork := getValueFromEnv(sriovNetworkEnvVar, defaultSriovNetwork, "SRIOV network")
 				o.Expect(sriovNetwork).ToNot(o.BeEmpty(), fmt.Sprintf("missing SRIOV network to join"))
 
-				testPods := pps.MakeBusyboxPods(testNs, deviceResourceName)
-				for _, testPod := range testPods {
+				pods := pps.MakeBusyboxPods(testNs, deviceResourceName)
+				for _, testPod := range pods {
 					testPod.Annotations = map[string]string{
 						networkAttachmentAnnotation: fmt.Sprintf("%s@%s", sriovNetwork, sriovInterfaceName),
 					}
 				}
-				updatedPods := createPodsOnNodeSync(client, testNs, nil, testPods...)
-				// TODO this leaks pods
-				defer deletePods(oc, updatedPods)
-				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
+				testingPods := createPodsOnNodeSync(client, testNs, nil, pods...)
+				defer deletePods(oc, testingPods)
+				expectPodsHaveAlignedResources(testingPods, oc, deviceResourceName)
 
-				ipAddrs, err := getPodsIPAddrs(updatedPods, sriovInterfaceName)
+				ipAddrs, err := getPodsIPAddrs(testingPods, sriovInterfaceName)
 				e2e.ExpectNoError(err)
 				family := getValueFromEnv(ipFamilyEnvVar, defaultIPFamily, "IP family")
 
-				for _, srcPod := range updatedPods {
+				for _, srcPod := range testingPods {
 					for _, dstAddrs := range ipAddrs {
 						dstAddr, err := findFirstIPForFamily(dstAddrs, family)
 						e2e.ExpectNoError(err)
@@ -209,7 +208,8 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				}
 
 				pod := testFw.PodClient().Create(testPod)
-				defer deletePods(oc, []*corev1.Pod{pod})
+				testingPods := []*corev1.Pod{pod}
+				defer deletePods(oc, testingPods)
 				err := e2epod.WaitForPodCondition(testFw.ClientSet, testNs, pod.Name, "Failed", 30*time.Second, func(pod *corev1.Pod) (bool, error) {
 					if pod.Status.Phase != corev1.PodPending {
 						return true, nil
@@ -246,9 +246,10 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				}
 
 				testNs := oc.KubeFramework().Namespace.Name
-				testPods := pps.MakeBusyboxPods(testNs, deviceResourceName)
-				updatedPods := createPodsOnNodeSync(client, testNs, node, testPods...)
-				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
+				pods := pps.MakeBusyboxPods(testNs, deviceResourceName)
+				testingPods := createPodsOnNodeSync(client, testNs, node, pods...)
+				defer deletePods(oc, testingPods)
+				expectPodsHaveAlignedResources(testingPods, oc, deviceResourceName)
 			})
 
 		})
@@ -265,9 +266,10 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				}
 
 				testNs := oc.KubeFramework().Namespace.Name
-				testPods := pps.MakeBusyboxPods(testNs, deviceResourceName)
-				updatedPods := createPodsOnNodeSync(client, testNs, nil, testPods...)
-				expectPodsHaveAlignedResources(updatedPods, oc, deviceResourceName)
+				pods := pps.MakeBusyboxPods(testNs, deviceResourceName)
+				testingPods := createPodsOnNodeSync(client, testNs, nil, pods...)
+				defer deletePods(oc, testingPods)
+				expectPodsHaveAlignedResources(testingPods, oc, deviceResourceName)
 				// rely on cascade deletion when namespace is deleted
 			},
 			t.Entry("with single pod, single container requesting 1 core, 1 device", []PodParams{
