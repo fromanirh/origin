@@ -45,7 +45,6 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 		o.Expect(workerNodes).ToNot(o.BeEmpty())
 
 		topoMgrNodes = filterNodeWithTopologyManagerPolicy(workerNodes, client, oc, kubeletconfigv1beta1.SingleNumaNodeTopologyManager)
-		expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
 
 		deviceResourceName = getDeviceResourceName()
 		// we don't handle yet an uneven device amount on worker nodes. IOW, we expect the same amount of devices on each node
@@ -92,6 +91,9 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 			g.BeforeEach(func() {
 				var nn int
 				f = oc.KubeFramework()
+
+				expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
+
 				node, nn = findNodeWithMultiNuma(topoMgrNodes, client, oc)
 
 				message := "multi-NUMA node system not found in the cluster"
@@ -189,6 +191,8 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 
 		t.DescribeTable("should guarantee NUMA-aligned cpu cores in gu pods",
 			func(pps PodParamsList) {
+				expectNonZeroNodes(topoMgrNodes, "topology manager not configured on all nodes")
+
 				if requestCpu, ok := enoughCoresInTheCluster(topoMgrNodes, pps); !ok {
 					g.Skip(fmt.Sprintf("not enough CPU resources in the cluster requested=%v", requestCpu))
 				}
