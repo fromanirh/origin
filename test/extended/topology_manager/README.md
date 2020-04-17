@@ -4,7 +4,7 @@
 
 Tests in this directory tree check the behaviour of the topology manager.
 To work correctly, the topology manager orchestrates various other components like cpu manager and device manager.
-Furthermore, the topology manager is most useful to align device resources, like SRIOV cards.
+Furthermore, the topology manager is most useful to align device resources, like SRIOV VFs.
 All of the above means that the configuration is complex and may require cluster-specific tuning.
 
 ## test configuration
@@ -29,6 +29,9 @@ Use this variable to change the kubernetes label to be used to search for the wo
 
 The testsuite need a SRIOV device resource to run alignment tests.
 Use this variable to change the resource name the test should use.
+The resource name depends on the
+[SRIOV operator settings](https://docs.openshift.com/container-platform/4.2/networking/multiple_networks/configuring-sr-iov.html#configuring-sr-iov-devices_configuring-sr-iov).
+Examples of resource names are: `openshift.io/sriovnic`, `openshift.io/dpdknic`.
 
 ### `SRIOV_NETWORK_NAMESPACE`
 
