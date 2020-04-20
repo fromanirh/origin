@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	exutil "github.com/openshift/origin/test/extended/util"
@@ -292,26 +293,36 @@ func makeBusyboxPod(namespace string) *corev1.Pod {
 	}
 }
 
-func createPodsOnNodeSync(client clientset.Interface, namespace string, node *corev1.Node, testPods ...*corev1.Pod) []*corev1.Pod {
-	var updatedPods []*corev1.Pod
-	for _, testPod := range testPods {
-		if node != nil {
-			testPod.Spec.NodeSelector = map[string]string{
-				labelHostname: node.Name,
-			}
+func setNodeForPods(pods []*corev1.Pod, node *corev1.Node) {
+	for _, pod := range pods {
+		pod.Spec.NodeSelector = map[string]string{
+			labelHostname: node.Name,
 		}
-
-		created, err := client.CoreV1().Pods(namespace).Create(context.Background(), testPod, metav1.CreateOptions{})
-		e2e.ExpectNoError(err)
-
-		err = waitForPhase(client, created.Namespace, created.Name, corev1.PodRunning, 5*time.Minute)
-		e2e.ExpectNoError(err)
-
-		updatedPod, err := client.CoreV1().Pods(created.Namespace).Get(context.Background(), created.Name, metav1.GetOptions{})
-		e2e.ExpectNoError(err)
-
-		updatedPods = append(updatedPods, updatedPod)
 	}
+
+}
+
+func createPods(client clientset.Interface, namespace string, testPods ...*corev1.Pod) []*corev1.Pod {
+	updatedPods := make([]*corev1.Pod, len(testPods), len(testPods))
+	var wg sync.WaitGroup
+
+	for i := 0; i < len(testPods); i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+
+			created, err := client.CoreV1().Pods(namespace).Create(context.Background(), testPods[idx], metav1.CreateOptions{})
+			e2e.ExpectNoError(err)
+
+			err = waitForPhase(client, created.Namespace, created.Name, corev1.PodRunning, 5*time.Minute)
+			e2e.ExpectNoError(err)
+
+			updatedPods[idx], err = client.CoreV1().Pods(created.Namespace).Get(context.Background(), created.Name, metav1.GetOptions{})
+			e2e.ExpectNoError(err)
+		}(i)
+	}
+	wg.Wait()
+
 	return updatedPods
 }
 

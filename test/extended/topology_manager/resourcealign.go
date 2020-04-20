@@ -61,7 +61,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 				ns := oc.KubeFramework().Namespace.Name
 				testingPods := pps.MakeBusyboxPods(ns, deviceResourceName)
 				// we just want to run pods and check they actually go running
-				createPodsOnNodeSync(client, ns, nil, testingPods...)
+				createPods(client, ns, testingPods...)
 				defer deletePods(oc, testingPods)
 			},
 			// fhbz#1813397 - k8s issue83775
@@ -159,7 +159,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 						networkAttachmentAnnotation: fmt.Sprintf("%s@%s", sriovNetwork, sriovInterfaceName),
 					}
 				}
-				testingPods := createPodsOnNodeSync(client, testNs, nil, pods...)
+				testingPods := createPods(client, testNs, pods...)
 				defer deletePods(oc, testingPods)
 				expectPodsHaveAlignedResources(testingPods, oc, deviceResourceName)
 
@@ -247,7 +247,10 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 
 				testNs := oc.KubeFramework().Namespace.Name
 				pods := pps.MakeBusyboxPods(testNs, deviceResourceName)
-				testingPods := createPodsOnNodeSync(client, testNs, node, pods...)
+
+				setNodeForPods(pods, node)
+
+				testingPods := createPods(client, testNs, pods...)
 				defer deletePods(oc, testingPods)
 				expectPodsHaveAlignedResources(testingPods, oc, deviceResourceName)
 			})
@@ -267,7 +270,7 @@ var _ = g.Describe("[Serial][sig-node][Feature:TopologyManager] Configured clust
 
 				testNs := oc.KubeFramework().Namespace.Name
 				pods := pps.MakeBusyboxPods(testNs, deviceResourceName)
-				testingPods := createPodsOnNodeSync(client, testNs, nil, pods...)
+				testingPods := createPods(client, testNs, pods...)
 				defer deletePods(oc, testingPods)
 				expectPodsHaveAlignedResources(testingPods, oc, deviceResourceName)
 				// rely on cascade deletion when namespace is deleted
